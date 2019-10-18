@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"regexp"
 	"testing"
+	"time"
 
 	"go.etcd.io/etcd/pkg/fileutil"
 	"go.etcd.io/etcd/pkg/pbutil"
@@ -948,5 +949,78 @@ func TestRenameFail(t *testing.T) {
 	w2, werr := w.renameWAL(tp)
 	if w2 != nil || werr == nil { // os.Rename should fail from 'no such file or directory'
 		t.Fatalf("expected error, got %v", werr)
+	}
+}
+
+func TestEntries(t *testing.T) {
+	//dir := "./TestEntries"
+	dir := os.TempDir()
+	os.MkdirAll(dir, 0755)
+	p, err := ioutil.TempDir(dir, "waltest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	//defer os.RemoveAll(p)
+
+	w, err := Create(zap.NewExample(), p, []byte("metadata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := raftpb.HardState{Term: 1}
+	if err = w.Save(state, nil); err != nil {
+		t.Fatal(err)
+	}
+	bigData := make([]byte, 500)
+	strdata := "Hello World!!"
+	copy(bigData, strdata)
+	// set a lower value for SegmentSizeBytes, else the test takes too long to complete
+	restoreLater := SegmentSizeBytes
+	const EntrySize int = 500
+	SegmentSizeBytes = 2 * 1024
+	defer func() { SegmentSizeBytes = restoreLater }()
+	index := uint64(0)
+	for totalSize := 0; totalSize < int(SegmentSizeBytes); totalSize += EntrySize {
+		ents := []raftpb.Entry{{Index: index, Term: 1, Data: bigData}}
+		if err = w.Save(state, ents); err != nil {
+			t.Fatal(err)
+		}
+		index++
+	}
+
+	defer w.Close()
+	ents, err := w.Entries(0, 4, 2*1024)
+	start := time.Now()
+	for i := 0; i < 1000<<10; i++ {
+		ents, err = w.Entries(0, 4, 2*1024)
+	}
+	fmt.Printf("elapse %0.2f \n", time.Now().Sub(start).Seconds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 4 {
+		t.Fatal("entries size is not 4")
+	}
+	for i, entry := range ents {
+		if uint64(i) != entry.Index {
+			t.Fatalf("expect entry index %d actual %d", i, entry.Index)
+		}
+		if !bytes.Equal(entry.Data, bigData) {
+			t.Errorf("the saved data does not match at Index %d : found: %s , want :%s", entry.Index, entry.Data, bigData)
+		}
+	}
+
+	// cut by maxSize
+	ents, err = w.Entries(0, 4, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 2 {
+		t.Fatal("entries size is not 4")
+	}
+	for i, entry := range ents {
+		if uint64(i) != entry.Index {
+			t.Fatalf("expect entry index %d actual %d", i, entry.Index)
+		}
 	}
 }

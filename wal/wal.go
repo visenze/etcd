@@ -909,3 +909,60 @@ func closeAll(rcs ...io.ReadCloser) error {
 	}
 	return nil
 }
+
+func (w *WAL) Entries(lo, hi, maxSize uint64) ([]raftpb.Entry, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if lo > w.enti {
+		return nil, errors.New(fmt.Sprintf("entries' lo(%d) is out of bound lastindex(%d)", lo, w.enti))
+	}
+	if hi > w.enti+1 {
+		return nil, errors.New(fmt.Sprintf("entries' hi(%d) is out of bound lastindex(%d)", hi, w.enti))
+	}
+	fileNames, startIndex, endIndex, err := selectWALFilesByIndexRange(w.lg, w.dir, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	var size uint64
+	ents := make([]raftpb.Entry, 0)
+Outer:
+	for i := startIndex; i < endIndex; i++ {
+		rf, err := os.OpenFile(filepath.Join(w.dir, fileNames[i]), os.O_RDONLY, fileutil.PrivateFileMode)
+		if err != nil {
+			rf.Close()
+			return nil, err
+		}
+
+		rec := &walpb.Record{}
+		decoder := newDecoder(rf)
+		for err = decoder.decode(rec); err == nil; err = decoder.decode(rec) {
+			if rec.Type == entryType {
+				e := mustUnmarshalEntry(rec.Data)
+				if e.Index >= lo {
+					ents = append(ents, e)
+				}
+				size += uint64(rec.Size())
+				if size >= maxSize {
+					break Outer
+				}
+			}
+		}
+		rf.Close()
+	}
+	return ents, nil
+}
+
+func selectWALFilesByIndexRange(lg *zap.Logger, dirpath string, loIndex, hiIndex uint64) ([]string, int, int, error) {
+	names, err := readWALNames(lg, dirpath)
+	if err != nil {
+		return nil, -1, -1, err
+	}
+
+	startIndex, endIndex, ok := searchIndexRange(lg, names, loIndex, hiIndex)
+	if !ok || !isValidSeq(lg, names[startIndex:endIndex]) {
+		err = ErrFileNotFound
+		return nil, -1, -1, err
+	}
+
+	return names, startIndex, endIndex, nil
+}

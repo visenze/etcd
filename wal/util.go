@@ -56,6 +56,36 @@ func searchIndex(lg *zap.Logger, names []string, index uint64) (int, bool) {
 	return -1, false
 }
 
+func searchIndexRange(lg *zap.Logger, names []string, loIndex, hiIndex uint64) (int, int, bool) {
+	startIndex := -1
+	endIndex := -1
+	for i := len(names) - 1; i >= 0; i-- {
+		name := names[i]
+		_, curIndex, err := parseWALName(name)
+		if err != nil {
+			if lg != nil {
+				lg.Panic("failed to parse WAL file name", zap.String("path", name), zap.Error(err))
+			} else {
+				plog.Panicf("parse correct name should never fail: %v", err)
+			}
+		}
+		if loIndex >= curIndex {
+			startIndex = i
+			break
+		}
+		if curIndex > hiIndex {
+			endIndex = i
+		}
+	}
+	if startIndex > -1 {
+		if startIndex >= endIndex {
+			endIndex = startIndex + 1
+		}
+		return startIndex, endIndex, true
+	}
+	return -1, -1, false
+}
+
 // names should have been sorted based on sequence number.
 // isValidSeq checks whether seq increases continuously.
 func isValidSeq(lg *zap.Logger, names []string) bool {
