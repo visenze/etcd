@@ -122,3 +122,30 @@ func parseWALName(str string) (seq, index uint64, err error) {
 func walName(seq, index uint64) string {
 	return fmt.Sprintf("%016x-%016x.wal", seq, index)
 }
+
+// searchIndex returns the last array index of names whose raft index section is
+// equal to or smaller than the given index.
+// The given names MUST be sorted.
+func searchIndexRange(lg *zap.Logger, names []string, loIndex uint64, hiIndex uint64) (int, int, bool) {
+	startFileIndex := -1
+	endFileIndex := -1
+	for i := len(names) - 1; i >= 0; i-- {
+		name := names[i]
+		_, curIndex, err := parseWALName(name)
+		if err != nil {
+			if lg != nil {
+				lg.Panic("failed to parse WAL file name", zap.String("path", name), zap.Error(err))
+			} else {
+				plog.Panicf("parse correct name should never fail: %v", err)
+			}
+		}
+		if curIndex > hiIndex {
+			endFileIndex = i
+		}
+		startFileIndex = i
+		if curIndex <= loIndex {
+			return startFileIndex, endFileIndex, true
+		}
+	}
+	return -1, -1, false
+}

@@ -20,12 +20,14 @@ import (
 	"io"
 	"io/ioutil"
 	"math"
+	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"testing"
+	"time"
 
 	"go.etcd.io/etcd/pkg/fileutil"
 	"go.etcd.io/etcd/pkg/pbutil"
@@ -948,5 +950,166 @@ func TestRenameFail(t *testing.T) {
 	w2, werr := w.renameWAL(tp)
 	if w2 != nil || werr == nil { // os.Rename should fail from 'no such file or directory'
 		t.Fatalf("expected error, got %v", werr)
+	}
+}
+
+func TestEntries(t *testing.T) {
+	dir := "./TestEntries1"
+	//dir := os.TempDir()
+	os.MkdirAll(dir, 0755)
+	p, err := ioutil.TempDir(dir, "waltest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	//defer os.RemoveAll(p)
+
+	w, err := Create(zap.NewExample(), p, []byte("metadata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := raftpb.HardState{Term: 1}
+	if err = w.Save(state, nil); err != nil {
+		t.Fatal(err)
+	}
+	bigData := make([]byte, 1*1024)
+	strdata := "Hello World!!"
+	copy(bigData, strdata)
+	// set a lower value for SegmentSizeBytes, else the test takes too long to complete
+	restoreLater := SegmentSizeBytes
+	SegmentSizeBytes = 8 * 1024
+	defer func() { SegmentSizeBytes = restoreLater }()
+	index := uint64(0)
+	for i := 1; i <= 20; i++ {
+		ents := []raftpb.Entry{{Index: index, Term: 1, Data: bigData}}
+		if err = w.Save(state, ents); err != nil {
+			t.Fatal(err)
+		}
+		index++
+	}
+	w.sync()
+
+	w.Close()
+
+	wal2, err := Open(zap.NewExample(), p, walpb.Snapshot{})
+	if err != nil {
+		t.Errorf("can not open wal by path=%v", p)
+	}
+	_, _, allEnts, err := wal2.ReadAll()
+	if err != nil {
+		t.Errorf("can not read all wal2")
+	}
+	fmt.Println(len(allEnts))
+
+	defer w.Close()
+	ents, err := w.Entries(10, 12, 100*1024)
+	start := time.Now()
+	//for i := 0; i < 100000; i++ {
+	//	ents, err = w.Entries(0, 4, 2*1024)
+	//}
+	fmt.Printf("elapse %0.2f \n", time.Now().Sub(start).Seconds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 2 {
+		t.Fatal("entries size is not 2 real size", len(ents))
+	}
+	for i, entry := range ents {
+		if uint64(i+10) != entry.Index {
+			t.Fatalf("expect entry index %d actual %d", uint64(i+10), entry.Index)
+		}
+		if !bytes.Equal(entry.Data, bigData) {
+			t.Errorf("the saved data does not match at Index %d : found: %s , want :%s", entry.Index, entry.Data, bigData)
+		}
+	}
+
+	// cut by maxSize
+	ents, err = w.Entries(0, 4, 100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 4 {
+		t.Fatal("entries size is not 4")
+	}
+	for i, entry := range ents {
+		if uint64(i) != entry.Index {
+			t.Fatalf("expect entry index %d actual %d", i, entry.Index)
+		}
+	}
+}
+
+func TestEntriesWritePerformance(t *testing.T) {
+	dir := "./TestEntries2"
+	//dir := os.TempDir()
+	os.MkdirAll(dir, 0755)
+	p, err := ioutil.TempDir(dir, "waltest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	//defer os.RemoveAll(p)
+
+	w, err := Create(zap.NewExample(), p, []byte("metadata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := raftpb.HardState{Term: 1}
+	if err = w.Save(state, nil); err != nil {
+		t.Fatal(err)
+	}
+	// set a lower value for SegmentSizeBytes, else the test takes too long to complete
+	restoreLater := SegmentSizeBytes
+	SegmentSizeBytes = 8 * 1024 * 1024
+	defer func() { SegmentSizeBytes = restoreLater }()
+	index := uint64(0)
+	start := time.Now()
+	for i := 1; i <= 2000; i++ {
+		entsSize := 100
+		ents := make([]raftpb.Entry, entsSize)
+		for j := 0; j < entsSize; j++ {
+			ents[j] = raftpb.Entry{Index: index, Term: 1, Data: []byte(randStringRunes(4 * 1024))}
+			index++
+		}
+		if err = w.Save(state, ents); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fmt.Println("save elapse", time.Now().Sub(start))
+	w.sync()
+}
+
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func randStringRunes(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
+
+func TestEntriesReadPerformance(t *testing.T) {
+	dir := "./TestEntries/waltest954895414"
+	w, err := OpenForRead(zap.NewExample(), dir, walpb.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.enti = 200000
+	// set a lower value for SegmentSizeBytes, else the test takes too long to complete
+	restoreLater := SegmentSizeBytes
+	const EntrySize int = 4 * 1024
+	SegmentSizeBytes = 8 * 1024 * 1024
+	defer func() { SegmentSizeBytes = restoreLater }()
+
+	start := time.Now()
+	step := 32
+	ents, err := w.Entries(2023, 2048, 32*1024*1024)
+	for i := 0; i < 100000; i += step {
+		ents, err = w.Entries(uint64(i), uint64(i+step), 32*1024*1024)
+		fmt.Printf("lo=%d hi=%d entries size=%d time=%s \n", i, i+step, len(ents), time.Now())
+	}
+	fmt.Printf("elapse %0.2f \n", time.Now().Sub(start).Seconds())
+	if err != nil {
+		t.Fatal(err)
 	}
 }
